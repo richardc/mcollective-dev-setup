@@ -1,0 +1,113 @@
+#!/usr/bin/env ruby
+require 'thor'
+require 'pathname'
+require 'progress_bar'
+require 'yaml'
+
+class Setup < Thor
+  # Making demo environments is a bit fiddly as you have to set up a config file
+  # for each role, and foreman doesn't paramterise nicely, so generate the
+  # entire thing
+
+  desc "make_demo DIRECTORY", "makes a demo in a directory"
+  method_option :mcollective,
+                :default => Pathname.new('~/src/mcollective').expand_path.to_s,
+                :desc => "Where to find an MCollective checkout"
+
+  method_option :number_of_servers,
+                :aliases => %w[ n ],
+                :type => :numeric,
+                :default => 5,
+                :desc => 'How many servers to make'
+
+  def make_demo(directory)
+    directory = Pathname.new(directory)
+    puts "making a demo in '#{directory}' with #{options[:number_of_servers]} servers"
+    directory.mkpath
+
+    roles = []
+    roles << 'client'
+    options[:number_of_servers].times do |i|
+      roles << "server-#{i}"
+    end
+
+    make_procfile(directory, options, roles)
+
+    bar = ProgressBar.new(roles.size)
+    roles.each do |node|
+      make_mcollective_config(directory, options, node)
+      bar.increment!
+    end
+
+    make_client(directory, options)
+  end
+
+  private
+
+  # foreman is another fine application which follows the ruby 'style' of
+  # having it's project name and main config file have distinct names (yes
+  # bundler, I'm looking at you)
+  def make_procfile(directory, options, roles)
+    File.open(directory + 'Procfile', 'w') do |file|
+      roles.each do |role|
+        case role
+        when /^server-/
+          file.puts "#{role}: ruby -I #{options[:mcollective]}/lib #{options[:mcollective]}/bin/mcollectived --config #{role}.cfg"
+        end
+      end
+    end
+  end
+
+  def make_mcollective_config(directory, options, node)
+    File.open(directory + "#{node}.cfg", 'w') do |file|
+      file.puts """
+daemonize = false
+
+libdir = #{options[:mcollective]}/plugins
+logger_type = console
+loglevel = info
+plugin.psk = pies
+
+identity = #{node}
+
+factsource = yaml
+plugin.yaml = #{node}.facts.yaml
+
+connector = activemq
+
+plugin.activemq.pool.size = 1
+plugin.activemq.pool.1.host = 127.0.0.1
+plugin.activemq.pool.1.port = 61613
+plugin.activemq.pool.1.user = mcollective
+plugin.activemq.pool.1.password = marionette
+        """
+
+        if node == "client"
+          file.puts "plugin.activemq.max_reconnect_attempts = 3"
+        end
+
+    end
+
+    facts = {
+      "foo" => {
+        "bar" => "baz"
+      },
+      "five" => 5,
+      "six_string" => "6",
+    }
+    File.open(directory + "#{node}.facts.yaml", 'w') do |fh|
+      fh.puts facts.to_yaml
+    end
+  end
+
+  def make_client(directory, options)
+    mco = directory + 'mco'
+    File.open(mco, 'w') do |file|
+      file.puts "#!/bin/bash"
+      file.puts "exec ruby -I #{options[:mcollective]}/lib #{options[:mcollective]}/bin/mco \"$@\" --config client.cfg"
+    end
+    mco.chmod(0755)
+  end
+end
+
+Setup.start
